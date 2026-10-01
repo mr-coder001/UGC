@@ -1,0 +1,26 @@
+{
+  "name": "smart-ugc-studio",
+  "version": "1.0.0",
+  "description": "Smart UGC Moderation & Asset Studio - Cloudinary AI Hackathon 2026",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "cloudinary",
+    "ugc",
+    "moderation",
+    "asset-studio",
+    "ai-pipeline"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cloudinary": "^2.2.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1"
+  }
+}

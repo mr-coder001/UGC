@@ -1,12 +1,14 @@
 /**
  * Smart UGC Moderation & Asset Studio - Application Logic
  * Cloudinary AI Hackathon 2026 — Track 1: AI Media Pipelines
- * Step 8: Smart Optimization, Asset Library & Studio Polish
+ * Security & Google Authentication Upgrade
  */
 
-// Application State (Single Source of Truth: Cloudinary via Backend API)
+// Application State (Single Source of Truth: Database & Authenticated Session)
 const state = {
   currentView: 'dashboard',
+  user: null, // { id, email, name, profileImage }
+  isAuthenticated: false,
   selectedFile: null,
   selectedFileDataUrl: null,
   selectedFileMeta: {
@@ -29,7 +31,7 @@ const state = {
   isLoadingStats: false
 };
 
-// Preset Sample Images for One-Click Quick Testing
+// Preset Sample Images for Quick Testing
 const samplePresets = [
   {
     name: 'sample_fashion_portrait.jpg',
@@ -83,7 +85,7 @@ function formatDate(dateStr) {
 }
 
 // Initialize application on DOM ready
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   initNavigation();
   initUploadHandler();
   initResultsTabs();
@@ -91,20 +93,25 @@ document.addEventListener('DOMContentLoaded', () => {
   initSettings();
   initLightboxListeners();
   initSamplePresets();
-  
+  handleUrlAuthMessages();
+
   // Set default sample preview
   setSampleImage(0);
 
-  // Fetch real data from Cloudinary backend
-  fetchDashboardStats();
-  fetchRecentDashboardAssets();
-  fetchAssetLibrary().then(() => {
-    // If no active asset in Asset Studio yet, load the latest real Cloudinary asset
-    if (!state.uploadedAsset && state.assets && state.assets.length > 0) {
-      state.uploadedAsset = state.assets[0];
-      populateResultsView(state.uploadedAsset);
-    }
-  });
+  // Fetch authentication status first
+  await checkAuthStatus();
+
+  // If authenticated, load user-specific data
+  if (state.isAuthenticated) {
+    fetchDashboardStats();
+    fetchRecentDashboardAssets();
+    fetchAssetLibrary().then(() => {
+      if (!state.uploadedAsset && state.assets && state.assets.length > 0) {
+        state.uploadedAsset = state.assets[0];
+        populateResultsView(state.uploadedAsset);
+      }
+    });
+  }
 });
 
 // Toast Notification Engine
@@ -132,8 +139,196 @@ function showToast(message, type = 'success') {
     toast.style.transform = 'translateX(50px)';
     toast.style.transition = 'all 0.3s ease';
     setTimeout(() => toast.remove(), 300);
-  }, 3500);
+  }, 3800);
 }
+
+// Check OAuth callback parameters in URL
+function handleUrlAuthMessages() {
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.get('auth_success')) {
+    showToast('✓ Successfully signed in with Google!', 'success');
+    window.history.replaceState({}, document.title, window.location.pathname);
+  } else if (urlParams.get('auth_error')) {
+    const err = urlParams.get('auth_error');
+    if (err === 'not_configured') {
+      showToast('Google OAuth is not configured in backend .env', 'error');
+    } else {
+      showToast('Google sign-in was cancelled or failed.', 'error');
+    }
+    window.history.replaceState({}, document.title, window.location.pathname);
+  }
+}
+
+// ==========================================================================
+// 0. AUTHENTICATION CONTROLLER (Google OAuth 2.0 & Session State)
+// ==========================================================================
+async function checkAuthStatus() {
+  try {
+    const res = await fetch('/auth/me');
+    const data = await res.json().catch(() => null);
+
+    if (data && data.success && data.authenticated && data.user) {
+      state.user = data.user;
+      state.isAuthenticated = true;
+    } else {
+      state.user = null;
+      state.isAuthenticated = false;
+    }
+  } catch (err) {
+    console.warn('[Auth Check Error]:', err.message);
+    state.user = null;
+    state.isAuthenticated = false;
+  }
+
+  renderAuthUI();
+}
+
+function renderAuthUI() {
+  const topbarAuth = document.getElementById('topbar-auth-container');
+  const uploadGate = document.getElementById('upload-auth-gate');
+  const uploadWrapper = document.getElementById('upload-main-wrapper');
+  const libraryGate = document.getElementById('library-auth-gate');
+  const libraryControls = document.getElementById('library-controls-bar');
+  const settingsBadge = document.getElementById('settings-auth-status-badge');
+  const settingsAccountDetails = document.getElementById('settings-account-details');
+
+  if (state.isAuthenticated && state.user) {
+    // 1. Topbar: Show logged-in user profile with logout button
+    if (topbarAuth) {
+      const avatarHtml = state.user.profileImage
+        ? `<img src="${escapeHtml(state.user.profileImage)}" class="user-avatar-img" alt="${escapeHtml(state.user.name)}" onerror="this.onerror=null; this.outerHTML='<div class=\\'user-avatar-fallback\\'>${escapeHtml((state.user.name || 'U')[0].toUpperCase())}</div>'"/>`
+        : `<div class="user-avatar-fallback">${escapeHtml((state.user.name || 'U')[0].toUpperCase())}</div>`;
+
+      topbarAuth.innerHTML = `
+        <div class="topbar-auth-group">
+          <div class="user-profile-badge" onclick="navigateTo('settings')" title="Signed in as ${escapeHtml(state.user.email)}">
+            ${avatarHtml}
+            <div class="user-info-text">
+              <span class="user-display-name">${escapeHtml(state.user.name || 'User')}</span>
+              <span class="user-display-email">${escapeHtml(state.user.email)}</span>
+            </div>
+          </div>
+          <button type="button" class="btn-logout" id="btn-logout-topbar" onclick="handleLogout()" title="Sign out of account">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+            Sign Out
+          </button>
+        </div>
+      `;
+    }
+
+    // 2. Upload: show upload interface, hide gate
+    if (uploadGate) uploadGate.style.display = 'none';
+    if (uploadWrapper) {
+      uploadWrapper.classList.remove('dropzone-disabled');
+      uploadWrapper.style.opacity = '1';
+      uploadWrapper.style.pointerEvents = 'auto';
+    }
+
+    // 3. Library: show library controls, hide gate
+    if (libraryGate) libraryGate.style.display = 'none';
+    if (libraryControls) libraryControls.style.display = 'flex';
+
+    // 4. Settings: Show active account details
+    if (settingsBadge) {
+      settingsBadge.className = 'pill-badge cyan';
+      settingsBadge.textContent = 'Authenticated (Google)';
+    }
+
+    if (settingsAccountDetails) {
+      settingsAccountDetails.innerHTML = `
+        <div style="display: flex; align-items: center; gap: 16px; padding: 14px; background: rgba(15,23,42,0.6); border: 1px solid var(--border-subtle); border-radius: var(--radius-md);">
+          ${state.user.profileImage
+            ? `<img src="${escapeHtml(state.user.profileImage)}" style="width: 48px; height: 48px; border-radius: 50%; border: 2px solid var(--purple-primary);" alt="${escapeHtml(state.user.name)}"/>`
+            : `<div class="user-avatar-fallback" style="width: 48px; height: 48px; font-size: 18px;">${escapeHtml((state.user.name || 'U')[0].toUpperCase())}</div>`
+          }
+          <div style="flex: 1;">
+            <div style="font-size: 15px; font-weight: 700; color: #fff;">${escapeHtml(state.user.name || 'Google User')}</div>
+            <div style="font-size: 12.5px; color: var(--cyan-light); font-family: var(--font-mono); margin-top: 2px;">${escapeHtml(state.user.email)}</div>
+            <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">User ID: ${escapeHtml(state.user.id)}</div>
+          </div>
+          <button type="button" class="btn-logout" onclick="handleLogout()" style="padding: 8px 14px;">
+            Sign Out
+          </button>
+        </div>
+      `;
+    }
+
+  } else {
+    // 1. Topbar: Show Continue with Google button
+    if (topbarAuth) {
+      topbarAuth.innerHTML = `
+        <a href="/auth/google" class="btn-google-login" id="topbar-login-btn">
+          <svg class="google-icon-svg" viewBox="0 0 24 24">
+            <path fill="#EA4335" d="M12 5c1.6 0 3 .6 4.1 1.7l3.1-3.1C17.3 1.8 14.8 1 12 1 7.5 1 3.7 3.6 1.9 7.3l3.7 2.9C6.5 7.4 9 5 12 5z"/>
+            <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.7-.2-2.3H12v4.6h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.9z"/>
+            <path fill="#FBBC05" d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.3 0-.8.2-1.6.4-2.3L1.9 7.3C.7 9.7 0 12.3 0 15.2c0 2.8.7 5.4 1.9 7.8l3.7-2.9z"/>
+            <path fill="#34A853" d="M12 23.5c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2.4-6.4-5.2L1.9 16.5C3.7 20.4 7.5 23.5 12 23.5z"/>
+          </svg>
+          <span>Continue with Google</span>
+        </a>
+      `;
+    }
+
+    // 2. Upload: show gate, disable upload actions
+    if (uploadGate) uploadGate.style.display = 'flex';
+    if (uploadWrapper) {
+      uploadWrapper.classList.add('dropzone-disabled');
+      uploadWrapper.style.opacity = '0.5';
+      uploadWrapper.style.pointerEvents = 'none';
+    }
+
+    // 3. Library: show gate, hide controls
+    if (libraryGate) libraryGate.style.display = 'flex';
+    if (libraryControls) libraryControls.style.display = 'none';
+
+    // 4. Settings: Show unauthenticated prompt
+    if (settingsBadge) {
+      settingsBadge.className = 'pill-badge purple';
+      settingsBadge.textContent = 'Not Signed In';
+    }
+
+    if (settingsAccountDetails) {
+      settingsAccountDetails.innerHTML = `
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 14px; background: rgba(15,23,42,0.6); border: 1px solid var(--border-subtle); border-radius: var(--radius-md);">
+          <div>
+            <div style="font-size: 14px; font-weight: 600; color: #fff;">No Active User Session</div>
+            <div style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">Sign in with Google to enable private media upload and ownership.</div>
+          </div>
+          <a href="/auth/google" class="btn-google-login">
+            <svg class="google-icon-svg" viewBox="0 0 24 24">
+              <path fill="#EA4335" d="M12 5c1.6 0 3 .6 4.1 1.7l3.1-3.1C17.3 1.8 14.8 1 12 1 7.5 1 3.7 3.6 1.9 7.3l3.7 2.9C6.5 7.4 9 5 12 5z"/>
+              <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.7-.2-2.3H12v4.6h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.9z"/>
+              <path fill="#FBBC05" d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.3 0-.8.2-1.6.4-2.3L1.9 7.3C.7 9.7 0 12.3 0 15.2c0 2.8.7 5.4 1.9 7.8l3.7-2.9z"/>
+              <path fill="#34A853" d="M12 23.5c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2.4-6.4-5.2L1.9 16.5C3.7 20.4 7.5 23.5 12 23.5z"/>
+            </svg>
+            <span>Sign in with Google</span>
+          </a>
+        </div>
+      `;
+    }
+  }
+}
+
+window.handleLogout = async function() {
+  try {
+    const res = await fetch('/auth/logout', { method: 'POST' });
+    const data = await res.json().catch(() => null);
+
+    state.user = null;
+    state.isAuthenticated = false;
+    state.assets = [];
+    state.uploadedAsset = null;
+    state.dashboardStats = null;
+
+    renderAuthUI();
+    renderAssetLibraryGrid();
+    showToast('✓ Logged out successfully.', 'info');
+    navigateTo('dashboard');
+  } catch (err) {
+    console.error('[Logout Error]:', err);
+    showToast('Error during logout.', 'error');
+  }
+};
 
 // ==========================================================================
 // 1. NAVIGATION & ROUTING
@@ -149,7 +344,6 @@ function initNavigation() {
       const targetView = item.getAttribute('data-nav-target');
       navigateTo(targetView);
 
-      // Close mobile sidebar if open
       if (sidebar && sidebar.classList.contains('mobile-open')) {
         sidebar.classList.remove('mobile-open');
       }
@@ -164,13 +358,21 @@ function initNavigation() {
 
   // Action buttons throughout the UI
   document.querySelectorAll('[data-action="goto-upload"]').forEach(btn => {
-    btn.addEventListener('click', () => navigateTo('upload'));
+    btn.addEventListener('click', () => {
+      if (!state.isAuthenticated) {
+        showToast('Please sign in with Google to upload and process images.', 'info');
+      }
+      navigateTo('upload');
+    });
   });
 
   document.querySelectorAll('[data-action="goto-library"]').forEach(btn => {
     btn.addEventListener('click', () => {
+      if (!state.isAuthenticated) {
+        showToast('Please sign in with Google to view your private asset library.', 'info');
+      }
       navigateTo('assets');
-      fetchAssetLibrary();
+      if (state.isAuthenticated) fetchAssetLibrary();
     });
   });
 
@@ -182,7 +384,6 @@ function initNavigation() {
 function navigateTo(viewName) {
   state.currentView = viewName;
 
-  // Update nav active states
   document.querySelectorAll('.sidebar-nav .nav-item').forEach(item => {
     if (item.getAttribute('data-nav-target') === viewName) {
       item.classList.add('active');
@@ -191,7 +392,6 @@ function navigateTo(viewName) {
     }
   });
 
-  // Update views
   document.querySelectorAll('.view-section').forEach(view => {
     view.classList.remove('active-view');
   });
@@ -201,7 +401,6 @@ function navigateTo(viewName) {
     activeView.classList.add('active-view');
   }
 
-  // Update Topbar Title
   const titles = {
     dashboard: 'Dashboard',
     upload: 'Upload & Process UGC',
@@ -216,7 +415,6 @@ function navigateTo(viewName) {
     topbarTitle.textContent = titles[viewName];
   }
 
-  // When switching to studio results, populate active asset
   if (viewName === 'results') {
     if (!state.uploadedAsset && state.assets && state.assets.length > 0) {
       state.uploadedAsset = state.assets[0];
@@ -224,13 +422,17 @@ function navigateTo(viewName) {
     populateResultsView(state.uploadedAsset);
   }
 
-  // When switching to library, refresh if empty
-  if (viewName === 'assets' && state.assets.length === 0 && !state.isLoadingLibrary) {
-    fetchAssetLibrary();
+  if (viewName === 'assets') {
+    if (state.isAuthenticated) {
+      if (state.assets.length === 0 && !state.isLoadingLibrary) {
+        fetchAssetLibrary();
+      }
+    } else {
+      renderAuthUI();
+    }
   }
 
-  // When switching to dashboard, refresh stats
-  if (viewName === 'dashboard') {
+  if (viewName === 'dashboard' && state.isAuthenticated) {
     fetchDashboardStats();
     fetchRecentDashboardAssets();
   }
@@ -253,15 +455,22 @@ function initUploadHandler() {
   if (browseBtn) {
     browseBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (!state.isAuthenticated) {
+        showToast('Please sign in with Google to upload and process images.', 'info');
+        return;
+      }
       fileInput.click();
     });
   }
 
   dropzone.addEventListener('click', () => {
+    if (!state.isAuthenticated) {
+      showToast('Please sign in with Google to upload and process images.', 'info');
+      return;
+    }
     fileInput.click();
   });
 
-  // Drag & Drop events
   ['dragenter', 'dragover'].forEach(eventName => {
     dropzone.addEventListener(eventName, (e) => {
       e.preventDefault();
@@ -279,6 +488,10 @@ function initUploadHandler() {
   });
 
   dropzone.addEventListener('drop', (e) => {
+    if (!state.isAuthenticated) {
+      showToast('Please sign in with Google to upload and process images.', 'info');
+      return;
+    }
     const dt = e.dataTransfer;
     const files = dt.files;
     if (files && files.length > 0) {
@@ -300,6 +513,10 @@ function initUploadHandler() {
 
   if (startProcessBtn) {
     startProcessBtn.addEventListener('click', () => {
+      if (!state.isAuthenticated) {
+        showToast('Please sign in with Google to upload and process images.', 'error');
+        return;
+      }
       startProcessingPipeline();
     });
   }
@@ -308,13 +525,11 @@ function initUploadHandler() {
 function handleFileSelection(file) {
   if (!file) return;
 
-  // Validate format
   if (!file.type.startsWith('image/')) {
     showToast('Please select a valid image file (JPG, PNG, or WEBP).', 'error');
     return;
   }
 
-  // Validate size (10 MB max)
   if (file.size > 10 * 1024 * 1024) {
     showToast('File size exceeds the 10 MB limit.', 'error');
     return;
@@ -323,7 +538,6 @@ function handleFileSelection(file) {
   state.selectedFile = file;
   const sizeFormatted = formatFileSize(file.size);
   
-  // Use safe local browser preview URL
   try {
     const localUrl = URL.createObjectURL(file);
     state.selectedFileDataUrl = localUrl;
@@ -373,7 +587,6 @@ window.setSampleImage = async function(index) {
     type: 'image/jpeg'
   };
 
-  // Create a real File / Blob representation so POST /api/upload succeeds
   try {
     const res = await fetch(preset.url);
     const blob = await res.blob();
@@ -433,7 +646,7 @@ function resetProcessButton() {
 }
 
 // ==========================================================================
-// 3. CLOUDINARY UPLOAD & PIPELINE EXECUTION (Real Multi-Stage Execution)
+// 3. CLOUDINARY UPLOAD & PIPELINE EXECUTION
 // ==========================================================================
 const processingStages = [
   { id: 1, name: '01 Ingestion', detail: 'Streaming raw UGC bytes to Cloudinary media cloud...' },
@@ -441,20 +654,23 @@ const processingStages = [
   { id: 3, name: '03 AI Vision', detail: 'Extracting semantic auto-tags and subject objects...' },
   { id: 4, name: '04 Background Removal', detail: 'Generating neural cutout (e_background_removal)...' },
   { id: 5, name: '05 Smart Crop', detail: 'Computing subject-aware framing with g_auto (1:1, 4:5, 16:9, 9:16)...' },
-  { id: 6, name: '06 Smart Optimization', detail: 'Synthesizing dynamic delivery URLs (f_auto, q_auto)...' },
-  { id: 7, name: '07 Asset Studio Ready', detail: 'Publishing production asset into studio library...' }
+  { id: 6, name: '06 Smart Optimization', detail: 'Synthesizing dynamic signed delivery URLs (f_auto, q_auto)...' },
+  { id: 7, name: '07 Asset Studio Ready', detail: 'Persisting asset to your authenticated library...' }
 ];
 
 async function startProcessingPipeline() {
   if (state.isProcessing) return;
 
-  // 1. Check whether an image is selected
+  if (!state.isAuthenticated) {
+    showToast('Please sign in with Google to upload and process images.', 'error');
+    return;
+  }
+
   if (!state.selectedFile) {
     showToast('Please select an image first.', 'error');
     return;
   }
 
-  // 2. Loading state on process button
   const startBtn = document.getElementById('start-process-btn');
   if (startBtn) {
     startBtn.disabled = true;
@@ -478,7 +694,6 @@ async function startProcessingPipeline() {
   if (statusMsg) statusMsg.textContent = 'Streaming image to Cloudinary...';
   renderStagesList(1);
 
-  // 3. Send real POST /api/upload
   const formData = new FormData();
   formData.append('image', state.selectedFile);
 
@@ -504,14 +719,13 @@ async function startProcessingPipeline() {
     backendAsset = data.asset;
     state.uploadedAsset = backendAsset;
 
-    // Update state with Cloudinary metadata
     state.selectedFileMeta.name = backendAsset.originalName || state.selectedFileMeta.name;
     state.selectedFileMeta.size = formatFileSize(backendAsset.bytes) || state.selectedFileMeta.size;
     state.selectedFileMeta.dimensions = `${backendAsset.width || 2400} × ${backendAsset.height || 1600} px`;
     state.selectedFileMeta.type = backendAsset.format ? `image/${backendAsset.format}` : 'image/jpeg';
 
   } catch (err) {
-    console.error('[Cloudinary Request Error]:', err);
+    console.error('[Upload Request Error]:', err);
     showToast('Unable to connect to the backend server.', 'error');
     resetProcessButton();
     state.isProcessing = false;
@@ -519,10 +733,9 @@ async function startProcessingPipeline() {
     return;
   }
 
-  // 4. Progress visual pipeline with confirmed Cloudinary transformations
   let currentStageIndex = 1;
   const totalStages = processingStages.length;
-  const stageDuration = 250; // ms per stage
+  const stageDuration = 250;
 
   const interval = setInterval(() => {
     currentStageIndex++;
@@ -542,12 +755,11 @@ async function startProcessingPipeline() {
       state.isProcessing = false;
       resetProcessButton();
       
-      // Refresh dashboard stats and library cache in background
       fetchDashboardStats();
       fetchAssetLibrary();
 
       setTimeout(() => {
-        showToast('✓ Real Cloudinary Pipeline Complete: AI Moderation, Cutout, Smart Crops & Optimization!');
+        showToast('✓ AI Pipeline Complete: Moderation, Cutout, Smart Crops & Optimization!');
         populateResultsView(backendAsset);
         navigateTo('results');
       }, 300);
@@ -601,7 +813,6 @@ function initResultsTabs() {
     });
   });
 
-  // Background Tools Switcher Buttons
   const btnRemoveBg = document.getElementById('btn-mode-remove-bg');
   const btnGenBg = document.getElementById('btn-mode-gen-bg');
 
@@ -631,7 +842,6 @@ function initResultsTabs() {
     });
   }
 
-  // Preset Prompt Chips
   const promptChips = document.querySelectorAll('.prompt-chip');
   promptChips.forEach(chip => {
     chip.addEventListener('click', () => {
@@ -644,7 +854,6 @@ function initResultsTabs() {
     });
   });
 
-  // Smart Crop Aspect Ratio Selector Buttons
   const cropAspectBtns = document.querySelectorAll('.crop-aspect-btn');
   cropAspectBtns.forEach(btn => {
     btn.addEventListener('click', () => {
@@ -661,7 +870,6 @@ function initResultsTabs() {
     });
   });
 
-  // Smart Crop Main Action Button
   const btnGenCrop = document.getElementById('btn-generate-crop');
   if (btnGenCrop) {
     btnGenCrop.addEventListener('click', () => {
@@ -675,7 +883,6 @@ function initResultsTabs() {
     });
   }
 
-  // Generate AI Background Button
   const genBgBtn = document.getElementById('btn-generate-bg');
   if (genBgBtn) {
     genBgBtn.addEventListener('click', () => {
@@ -683,7 +890,6 @@ function initResultsTabs() {
     });
   }
 
-  // Copy Metadata Button
   const copyMetaBtn = document.getElementById('copy-metadata-btn');
   if (copyMetaBtn) {
     copyMetaBtn.addEventListener('click', () => {
@@ -691,6 +897,7 @@ function initResultsTabs() {
       const assetTags = (asset.tags && asset.tags.length > 0) ? asset.tags : ['media', 'ugc-asset'];
       const assetObjects = (asset.objects && asset.objects.length > 0) ? asset.objects : ['Subject'];
       const meta = {
+        id: asset.id || '',
         title: state.selectedFileMeta.name,
         public_id: asset.publicId || 'smart-ugc-studio/ugc_asset',
         original_url: asset.originalUrl || state.selectedFileDataUrl,
@@ -716,14 +923,13 @@ function initResultsTabs() {
     });
   }
 
-  // Optimization Card Action Buttons
   const btnCopyOpt = document.getElementById('btn-copy-optimized-url');
   if (btnCopyOpt) {
     btnCopyOpt.addEventListener('click', () => {
       const optUrl = (state.uploadedAsset && state.uploadedAsset.optimizedUrl) ? state.uploadedAsset.optimizedUrl : '';
       if (optUrl) {
         navigator.clipboard.writeText(optUrl).then(() => {
-          showToast('✓ Cloudinary Optimized URL (f_auto, q_auto) copied!');
+          showToast('✓ Signed Cloudinary Optimized URL (f_auto, q_auto) copied!');
         });
       } else {
         showToast('No active optimized asset URL available.', 'info');
@@ -735,7 +941,7 @@ function initResultsTabs() {
   if (saveLibBtn) {
     saveLibBtn.addEventListener('click', () => {
       navigateTo('assets');
-      fetchAssetLibrary();
+      if (state.isAuthenticated) fetchAssetLibrary();
     });
   }
 
@@ -754,6 +960,11 @@ async function triggerGenerateAiBackground() {
     return;
   }
 
+  if (!state.isAuthenticated) {
+    showToast('Please sign in with Google to generate AI backgrounds.', 'error');
+    return;
+  }
+
   const promptInput = document.getElementById('bg-prompt-input');
   const prompt = promptInput ? promptInput.value.trim() : '';
 
@@ -769,7 +980,6 @@ async function triggerGenerateAiBackground() {
   const overlayTitle = overlay ? overlay.querySelector('span:nth-of-type(1)') : null;
   const overlaySubtitle = overlay ? overlay.querySelector('span:nth-of-type(2)') : null;
 
-  // Activate loading state
   if (genBtn) {
     genBtn.disabled = true;
     genBtn.style.opacity = '0.7';
@@ -785,7 +995,6 @@ async function triggerGenerateAiBackground() {
     if (overlaySubtitle) overlaySubtitle.textContent = 'Cloudinary Generative AI Engine';
   }
 
-  // Automatically switch to AI Background view tab
   switchResultTab('ai-background');
   const aiTabBtn = document.querySelector('.results-tab-btn[data-tab="ai-background"]');
   if (aiTabBtn) {
@@ -799,6 +1008,7 @@ async function triggerGenerateAiBackground() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         publicId: asset.publicId,
+        assetId: asset.id,
         prompt: prompt
       })
     });
@@ -822,32 +1032,25 @@ async function triggerGenerateAiBackground() {
     if (data.asset.genCrop169Url) state.uploadedAsset.genCrop169Url = data.asset.genCrop169Url;
     if (data.asset.genCrop916Url) state.uploadedAsset.genCrop916Url = data.asset.genCrop916Url;
 
-    // Automatically set Smart Crop source to AI Background and update previews
     setSmartCropSource('ai-bg', false);
 
     if (aiBgImg) {
       let attempts = 0;
       const maxAttempts = 25;
-
       const preloader = new Image();
 
       preloader.onload = () => {
         aiBgImg.src = preloader.src;
         if (overlay) overlay.style.display = 'none';
         resetGenerateBgButton();
-        showToast('✓ Real Cloudinary AI Background Generated & Applied to Smart Crops!');
+        showToast('✓ Signed Cloudinary AI Background Generated & Applied to Smart Crops!');
       };
 
       preloader.onerror = () => {
         if (attempts < maxAttempts) {
           attempts++;
-          console.log(`[Cloudinary AI Background] Rendering on CDN (HTTP 423/Processing), polling attempt ${attempts}/${maxAttempts}...`);
-          if (overlayTitle) {
-            overlayTitle.textContent = `Generating AI background... (${attempts}/${maxAttempts})`;
-          }
-          if (overlaySubtitle) {
-            overlaySubtitle.textContent = 'Processing neural scene synthesis on Cloudinary CDN';
-          }
+          if (overlayTitle) overlayTitle.textContent = `Generating AI background... (${attempts}/${maxAttempts})`;
+          if (overlaySubtitle) overlaySubtitle.textContent = 'Processing neural scene synthesis on Cloudinary CDN';
           setTimeout(() => {
             const separator = generatedUrl.includes('?') ? '&' : '?';
             preloader.src = `${generatedUrl}${separator}_cld_poll=${Date.now()}`;
@@ -855,13 +1058,11 @@ async function triggerGenerateAiBackground() {
         } else {
           if (overlay) overlay.style.display = 'none';
           resetGenerateBgButton();
-          // Fallback to setting current URL so user can see it once cached
           aiBgImg.src = generatedUrl;
           showToast('Background generation queued on Cloudinary. Ready momentarily.', 'info');
         }
       };
 
-      // Initiate preloader polling
       preloader.src = generatedUrl;
     } else {
       if (overlay) overlay.style.display = 'none';
@@ -888,7 +1089,6 @@ function resetGenerateBgButton() {
   }
 }
 
-// Smart Crop Source Controller & Preview Renderer
 window.setSmartCropSource = function(source, showNotification = true) {
   state.smartCropSource = (source === 'original') ? 'original' : 'ai-bg';
 
@@ -899,7 +1099,6 @@ window.setSmartCropSource = function(source, showNotification = true) {
   const statusBadge = document.getElementById('crop-source-status-badge');
 
   if (state.smartCropSource === 'ai-bg') {
-    if (vpOrigBtn) vpOrigBtn.classList.add('active');
     if (vpOrigBtn) vpOrigBtn.classList.remove('active');
     if (vpAiBtn) vpAiBtn.classList.add('active');
     if (cardOrigBtn) cardOrigBtn.classList.remove('active');
@@ -990,7 +1189,6 @@ function renderSmartCropPreviews(asset) {
   if (btnDl916) btnDl916.setAttribute('onclick', `downloadFromImgId('crop-img-9-16', '${filenamePrefix}_9x16.jpg')`);
 }
 
-// Populate Asset Studio View with confirmed Cloudinary data
 function populateResultsView(asset) {
   const currentAsset = asset || state.uploadedAsset;
   const fallbackUrl = state.selectedFileDataUrl || samplePresets[0].url;
@@ -1000,7 +1198,6 @@ function populateResultsView(asset) {
   const genBgUrl = (currentAsset && currentAsset.generatedBackgroundUrl) ? currentAsset.generatedBackgroundUrl : fallbackUrl;
   const optimizedUrl = (currentAsset && currentAsset.optimizedUrl) ? currentAsset.optimizedUrl : fallbackUrl;
 
-  // Set image elements with real Cloudinary URLs
   const originalImg = document.getElementById('res-img-original');
   const modImg = document.getElementById('res-img-moderated');
   const bgOrigImg = document.getElementById('res-img-bg-orig');
@@ -1023,7 +1220,6 @@ function populateResultsView(asset) {
     bgCutoutImg.onerror = () => {
       if (bgRetries < 10) {
         bgRetries++;
-        console.log(`[Cloudinary] Background removal in progress (HTTP 423), retrying attempt ${bgRetries}/10...`);
         setTimeout(() => {
           bgCutoutImg.src = bgRemovedUrl + (bgRemovedUrl.includes('?') ? '&' : '?') + `_retry=${Date.now()}`;
         }, 1500);
@@ -1037,7 +1233,6 @@ function populateResultsView(asset) {
     genBgImg.onerror = () => {
       if (genRetries < 20) {
         genRetries++;
-        console.log(`[Cloudinary] AI Background generation in progress (HTTP 423), retrying attempt ${genRetries}/20...`);
         setTimeout(() => {
           genBgImg.src = genBgUrl + (genBgUrl.includes('?') ? '&' : '?') + `_retry=${Date.now()}`;
         }, 1500);
@@ -1052,12 +1247,10 @@ function populateResultsView(asset) {
       : 'Clean premium white studio background with soft natural lighting and a subtle realistic shadow underneath the subject.';
   }
 
-  // Determine smart crop source: if generated background exists, default to 'ai-bg'
   const hasAiBg = Boolean(currentAsset && (currentAsset.generatedBackgroundUrl || currentAsset.genCrop11Url));
   state.smartCropSource = hasAiBg ? 'ai-bg' : 'original';
   setSmartCropSource(state.smartCropSource, false);
 
-  // Set file size numbers on optimization card
   const origSizeEl = document.getElementById('res-stat-orig-size');
   if (origSizeEl) {
     origSizeEl.textContent = currentAsset && currentAsset.bytes ? formatFileSize(currentAsset.bytes) : state.selectedFileMeta.size;
@@ -1068,10 +1261,8 @@ function populateResultsView(asset) {
     openOptBtn.href = optimizedUrl;
   }
 
-  // Render Real Processing Pipeline Summary (Requirement 3)
   renderPipelineSummary(currentAsset);
 
-  // Update Real Cloudinary Moderation Section
   const modData = (currentAsset && currentAsset.moderation) ? currentAsset.moderation : {
     moderated: false,
     kind: 'aws_rek',
@@ -1102,7 +1293,6 @@ function populateResultsView(asset) {
     modMessageText.textContent = modData.message || 'No policy violations detected';
   }
 
-  // Update Hero Banner & Overlay according to real moderation status
   if (modStatus === 'rejected') {
     if (modHero) {
       modHero.className = 'moderation-status-hero rejected';
@@ -1128,7 +1318,6 @@ function populateResultsView(asset) {
       if (modViewportText) modViewportText.textContent = '⚠ REVIEW REQUIRED • Flagged for Safety';
     }
   } else {
-    // Approved / Safe
     if (modHero) {
       modHero.className = 'moderation-status-hero';
       if (modHeroIcon) modHeroIcon.outerHTML = '<svg id="mod-hero-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--safe-emerald)" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>';
@@ -1142,7 +1331,6 @@ function populateResultsView(asset) {
     }
   }
 
-  // Populate Real Moderation breakdown list
   if (modBarsList) {
     if (modData.labels && modData.labels.length > 0) {
       modBarsList.innerHTML = modData.labels.map(l => {
@@ -1183,7 +1371,6 @@ function populateResultsView(asset) {
     }
   }
 
-  // Populate AI Vision Tags & Detected Objects
   const tagsContainer = document.getElementById('res-tags-cloud');
   const objectsContainer = document.getElementById('res-objects-cloud');
   const visionCardBadge = document.getElementById('vision-card-badge');
@@ -1200,7 +1387,7 @@ function populateResultsView(asset) {
         <span class="tag-pill">#${escapeHtml(tag)}</span>
       `).join('');
     } else {
-      tagsContainer.innerHTML = `<span class="tag-pill" style="opacity: 0.7;">AI metadata unavailable</span>`;
+      tagsContainer.innerHTML = `<span class="tag-pill" style="opacity: 0.7;">AI metadata ready</span>`;
     }
   }
 
@@ -1218,19 +1405,17 @@ function populateResultsView(asset) {
     }
   }
 
-  // Update results header labels
   const mainTitle = document.getElementById('results-main-title');
   const statusBadge = document.getElementById('results-status-badge');
   const subtitle = document.getElementById('results-subtitle');
 
   if (mainTitle) mainTitle.textContent = currentAsset && currentAsset.originalName ? `Studio: ${currentAsset.originalName}` : 'Asset Studio';
-  if (statusBadge) statusBadge.textContent = 'Live Cloudinary Asset';
+  if (statusBadge) statusBadge.textContent = 'Signed Private Asset';
   if (subtitle) subtitle.textContent = 'AI Moderation, Auto-Tagging, Background Removal (e_background_removal), AI Background Generator (e_gen_background_replace), Smart Crop (g_auto), and Delivery Optimization.';
 
   switchResultTab('original');
 }
 
-// Render Real Processing Pipeline Summary Checklist (Requirement 3)
 function renderPipelineSummary(asset) {
   const container = document.getElementById('pipeline-summary-list');
   if (!container) return;
@@ -1293,7 +1478,6 @@ function renderPipelineSummary(asset) {
 function switchResultTab(tabId) {
   state.activeResultTab = tabId;
 
-  // Hide all viewports
   document.querySelectorAll('.tab-viewport').forEach(vp => {
     vp.style.display = 'none';
   });
@@ -1305,7 +1489,7 @@ function switchResultTab(tabId) {
 }
 
 // ==========================================================================
-// 5. ASSET LIBRARY (Connected to Cloudinary Search / Resources API)
+// 5. ASSET LIBRARY & SECURE DELETION (User-Specific)
 // ==========================================================================
 function initAssetLibrary() {
   const searchInput = document.getElementById('library-search-input');
@@ -1319,7 +1503,7 @@ function initAssetLibrary() {
       clearTimeout(debounceTimer);
       state.librarySearch = e.target.value.trim();
       debounceTimer = setTimeout(() => {
-        fetchAssetLibrary();
+        if (state.isAuthenticated) fetchAssetLibrary();
       }, 350);
     });
   }
@@ -1329,20 +1513,24 @@ function initAssetLibrary() {
       filterBtns.forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       state.libraryFilter = btn.getAttribute('data-filter');
-      fetchAssetLibrary();
+      if (state.isAuthenticated) fetchAssetLibrary();
     });
   });
 
   if (sortSelect) {
     sortSelect.addEventListener('change', (e) => {
       state.librarySort = e.target.value;
-      fetchAssetLibrary();
+      if (state.isAuthenticated) fetchAssetLibrary();
     });
   }
 
   if (refreshBtn) {
     refreshBtn.addEventListener('click', () => {
-      showToast('Syncing media assets from Cloudinary...', 'info');
+      if (!state.isAuthenticated) {
+        showToast('Please sign in with Google to view your assets.', 'info');
+        return;
+      }
+      showToast('Syncing your private assets from database...', 'info');
       fetchAssetLibrary(true);
       fetchDashboardStats();
     });
@@ -1353,12 +1541,17 @@ async function fetchAssetLibrary(showToastOnComplete = false) {
   const grid = document.getElementById('asset-grid-container');
   if (!grid) return;
 
+  if (!state.isAuthenticated) {
+    renderAuthUI();
+    return;
+  }
+
   state.isLoadingLibrary = true;
   grid.innerHTML = `
     <div class="loading-state-box">
       <div class="loading-spinner"></div>
-      <p style="font-size: 15px; font-weight: 600; color: #fff;">Loading assets from Cloudinary...</p>
-      <p style="font-size: 12.5px; color: var(--text-muted); margin-top: 4px;">Querying live media catalog via Cloudinary Search API</p>
+      <p style="font-size: 15px; font-weight: 600; color: #fff;">Loading your private assets...</p>
+      <p style="font-size: 12.5px; color: var(--text-muted); margin-top: 4px;">Querying database with authorized signed delivery</p>
     </div>
   `;
 
@@ -1377,12 +1570,19 @@ async function fetchAssetLibrary(showToastOnComplete = false) {
     const response = await fetch(`/api/assets?${params.toString()}`);
     const data = await response.json().catch(() => null);
 
+    if (response.status === 401) {
+      state.isAuthenticated = false;
+      state.user = null;
+      renderAuthUI();
+      return;
+    }
+
     if (!response.ok || !data || !data.success) {
       grid.innerHTML = `
         <div class="empty-state-box">
           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#f43f5e" stroke-width="1.5" style="margin-bottom: 12px; opacity: 0.8;"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
           <p style="font-size: 16px; font-weight: 600; color: #fff;">Unable to load assets</p>
-          <p style="font-size: 13px; color: var(--text-muted); margin-top: 4px;">Could not retrieve assets from Cloudinary backend.</p>
+          <p style="font-size: 13px; color: var(--text-muted); margin-top: 4px;">Could not retrieve your private assets.</p>
           <button class="btn btn-secondary btn-sm" onclick="fetchAssetLibrary(true)" style="margin-top: 14px;">Try Again</button>
         </div>
       `;
@@ -1394,7 +1594,7 @@ async function fetchAssetLibrary(showToastOnComplete = false) {
     renderAssetLibraryGrid();
 
     if (showToastOnComplete) {
-      showToast(`✓ Synced ${state.assets.length} assets from Cloudinary!`);
+      showToast(`✓ Loaded ${state.assets.length} private assets!`);
     }
 
   } catch (err) {
@@ -1415,12 +1615,17 @@ function renderAssetLibraryGrid() {
   const grid = document.getElementById('asset-grid-container');
   if (!grid) return;
 
+  if (!state.isAuthenticated) {
+    grid.innerHTML = '';
+    return;
+  }
+
   if (!state.assets || state.assets.length === 0) {
     grid.innerHTML = `
       <div class="empty-state-box">
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin-bottom: 12px; opacity: 0.5;"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
-        <p style="font-size: 16px; font-weight: 600; color: #fff;">No matching assets found</p>
-        <p style="font-size: 13px; color: var(--text-muted); margin-top: 4px;">No images in Cloudinary match the active filters or search terms.</p>
+        <p style="font-size: 16px; font-weight: 600; color: #fff;">No assets uploaded yet</p>
+        <p style="font-size: 13px; color: var(--text-muted); margin-top: 4px;">Upload your first image to process it through the AI pipeline.</p>
         <button class="btn btn-primary btn-sm" onclick="navigateTo('upload')" style="margin-top: 14px;">＋ Upload UGC Image</button>
       </div>
     `;
@@ -1444,8 +1649,11 @@ function renderAssetLibraryGrid() {
             <button type="button" class="quick-act-btn" title="Open in Asset Studio" onclick="loadAssetIntoStudio('${escapeHtml(asset.id)}')">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
             </button>
-            <button type="button" class="quick-act-btn" title="Copy Optimized URL" onclick="copyAssetUrl('${escapeHtml(asset.optimizedUrl || asset.originalUrl)}')">
+            <button type="button" class="quick-act-btn" title="Copy Signed Optimized URL" onclick="copyAssetUrl('${escapeHtml(asset.optimizedUrl || asset.originalUrl)}')">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            </button>
+            <button type="button" class="quick-act-btn danger" title="Delete Asset" onclick="confirmDeleteAsset('${escapeHtml(asset.id)}', '${escapeHtml(asset.title)}')">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#f43f5e" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
             </button>
           </div>
         </div>
@@ -1458,7 +1666,7 @@ function renderAssetLibraryGrid() {
             ${tags.length > 3 ? `<span class="asset-mini-tag">+${tags.length - 3}</span>` : ''}
           </div>
           <div class="asset-footer-row">
-            <span>${asset.originalSize || 'Orig Size'}</span>
+            <span>${formatFileSize(asset.bytes) || 'Cloudinary'}</span>
             <span class="asset-size-savings">f_auto / q_auto</span>
           </div>
         </div>
@@ -1483,7 +1691,7 @@ window.openAssetModal = function(assetId) {
 
   modalContent.innerHTML = `
     <div style="display: flex; gap: 24px; flex-wrap: wrap;">
-      <div style="flex: 1; min-width: 260px; max-height: 380px; border-radius: 12px; overflow: hidden; background: #000; display: flex; align-items: center; justify-content: center; position: relative;" class="clickable-preview" onclick="openLightbox('${previewImg}', '${escapeHtml(asset.title)}', 'Cloudinary Live Asset')">
+      <div style="flex: 1; min-width: 260px; max-height: 380px; border-radius: 12px; overflow: hidden; background: #000; display: flex; align-items: center; justify-content: center; position: relative;" class="clickable-preview" onclick="openLightbox('${previewImg}', '${escapeHtml(asset.title)}', 'Cloudinary Signed Asset')">
         <img src="${previewImg}" alt="${escapeHtml(asset.title)}" style="max-width: 100%; max-height: 100%; object-fit: contain;" />
         <div class="img-hover-hint">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
@@ -1494,13 +1702,13 @@ window.openAssetModal = function(assetId) {
         <div>
           <span class="pill-badge ${statusPillClass}">${(asset.status || 'safe').toUpperCase()} ASSET</span>
           <h3 style="font-size: 18px; margin-top: 8px; color: #fff; word-break: break-word;">${escapeHtml(asset.title)}</h3>
-          <p style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">Processed ${formatDate(asset.date)} • Cloudinary Managed</p>
+          <p style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">Processed ${formatDate(asset.createdAt)} • Cloudinary Managed</p>
         </div>
 
         <div style="background: rgba(15,23,42,0.7); border: 1px solid var(--border-subtle); padding: 12px 16px; border-radius: 10px; display: flex; flex-direction: column; gap: 6px;">
           <div style="display: flex; justify-content: space-between; font-size: 12px;">
             <span style="color: var(--text-secondary);">Ingested Size:</span>
-            <span style="color: #fff; font-weight: 600;">${asset.originalSize || 'Measured'}</span>
+            <span style="color: #fff; font-weight: 600;">${formatFileSize(asset.bytes)}</span>
           </div>
           <div style="display: flex; justify-content: space-between; font-size: 12px;">
             <span style="color: var(--text-secondary);">Delivery Format:</span>
@@ -1521,17 +1729,21 @@ window.openAssetModal = function(assetId) {
           </div>
         ` : ''}
 
-        <div style="margin-top: auto; display: flex; flex-wrap: wrap; gap: 8px;">
+        <div style="margin-top: auto; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
           <button type="button" class="btn btn-primary btn-sm" onclick="loadAssetIntoStudio('${escapeHtml(asset.id)}'); closeAssetModal();">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
             Open in Studio
           </button>
           <button type="button" class="btn btn-secondary btn-sm" onclick="triggerDownload('${previewImg}', '${escapeHtml(asset.title || 'asset.jpg')}')">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
             Download
           </button>
           <button type="button" class="btn btn-secondary btn-sm" onclick="copyAssetUrl('${escapeHtml(asset.optimizedUrl || asset.originalUrl)}')">
             Copy URL
+          </button>
+          <button type="button" class="btn btn-danger btn-sm" style="margin-left: auto;" onclick="confirmDeleteAsset('${escapeHtml(asset.id)}', '${escapeHtml(asset.title)}')">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+            Delete Asset
           </button>
         </div>
       </div>
@@ -1549,7 +1761,7 @@ window.closeAssetModal = function() {
 window.copyAssetUrl = function(url) {
   if (!url) return;
   navigator.clipboard.writeText(url).then(() => {
-    showToast('✓ Asset URL copied to clipboard!');
+    showToast('✓ Signed Asset URL copied to clipboard!');
   }).catch(() => {
     showToast('✓ Asset URL ready.', 'info');
   });
@@ -1562,7 +1774,7 @@ window.loadAssetIntoStudio = function(assetId) {
   state.uploadedAsset = asset;
   state.selectedFileMeta = {
     name: asset.title || asset.originalName || 'Cloudinary UGC Asset',
-    size: asset.originalSize || formatFileSize(asset.bytes),
+    size: formatFileSize(asset.bytes),
     dimensions: `${asset.width || 2400} × ${asset.height || 1600} px`,
     rawBytes: asset.bytes || 3984588,
     type: asset.format ? `image/${asset.format}` : 'image/jpeg'
@@ -1573,10 +1785,51 @@ window.loadAssetIntoStudio = function(assetId) {
   showToast(`Loaded "${asset.title}" into Asset Studio!`);
 };
 
+// Secure Asset Deletion Action
+window.confirmDeleteAsset = async function(assetId, assetTitle) {
+  if (!confirm(`Are you sure you want to permanently delete "${assetTitle || 'this asset'}"?\nThis will remove the Cloudinary file and all associated metadata.`)) {
+    return;
+  }
+
+  showToast('Deleting asset from Cloudinary and database...', 'info');
+
+  try {
+    const response = await fetch(`/api/assets/${encodeURIComponent(assetId)}`, {
+      method: 'DELETE'
+    });
+
+    const data = await response.json().catch(() => null);
+
+    if (!response.ok || !data || !data.success) {
+      const errorMsg = (data && data.message) ? data.message : 'Failed to delete asset.';
+      showToast(errorMsg, 'error');
+      return;
+    }
+
+    showToast('✓ Asset permanently deleted successfully!', 'success');
+    closeAssetModal();
+
+    // If active asset in studio was deleted, reset
+    if (state.uploadedAsset && state.uploadedAsset.id === assetId) {
+      state.uploadedAsset = null;
+    }
+
+    // Refresh library and stats
+    await fetchAssetLibrary();
+    await fetchDashboardStats();
+    await fetchRecentDashboardAssets();
+
+  } catch (err) {
+    console.error('[Delete Asset Error]:', err);
+    showToast('Network error while deleting asset.', 'error');
+  }
+};
+
 // ==========================================================================
 // 6. DASHBOARD DYNAMIC METRICS & RECENT ACTIVITY
 // ==========================================================================
 async function fetchDashboardStats() {
+  if (!state.isAuthenticated) return;
   state.isLoadingStats = true;
   try {
     const res = await fetch('/api/asset-stats');
@@ -1591,9 +1844,9 @@ async function fetchDashboardStats() {
       const kpiStorage = document.getElementById('kpi-storage-managed');
 
       const totalAssets = data.stats.totalAssets || 0;
-      const safeRate = data.stats.safePercentage != null ? data.stats.safePercentage : (data.stats.safeRate != null ? data.stats.safeRate : 100);
-      const totalTags = data.stats.totalTagsIndexed != null ? data.stats.totalTagsIndexed : (data.stats.totalTags || 0);
-      const totalBytes = data.stats.totalBytesStored != null ? data.stats.totalBytesStored : (data.stats.totalBytes || 0);
+      const safeRate = data.stats.safePercentage != null ? data.stats.safePercentage : 100;
+      const totalTags = data.stats.totalTagsIndexed != null ? data.stats.totalTagsIndexed : 0;
+      const totalBytes = data.stats.totalBytesStored != null ? data.stats.totalBytesStored : 0;
 
       if (kpiAssets) kpiAssets.textContent = totalAssets.toLocaleString();
       if (kpiSafe) kpiSafe.textContent = `${safeRate}%`;
@@ -1610,6 +1863,25 @@ async function fetchDashboardStats() {
 async function fetchRecentDashboardAssets() {
   const recentGrid = document.getElementById('dashboard-recent-grid');
   if (!recentGrid) return;
+
+  if (!state.isAuthenticated) {
+    recentGrid.innerHTML = `
+      <div style="grid-column: 1/-1; text-align: center; padding: 32px 16px; color: var(--text-muted);">
+        <p style="font-size: 14px; color: #fff;">Private Studio Dashboard</p>
+        <p style="font-size: 12px; margin-top: 4px;">Sign in with Google to access your automated AI media pipeline and personal library.</p>
+        <a href="/auth/google" class="btn-google-login" style="margin-top: 14px; display: inline-flex;">
+          <svg class="google-icon-svg" viewBox="0 0 24 24">
+            <path fill="#EA4335" d="M12 5c1.6 0 3 .6 4.1 1.7l3.1-3.1C17.3 1.8 14.8 1 12 1 7.5 1 3.7 3.6 1.9 7.3l3.7 2.9C6.5 7.4 9 5 12 5z"/>
+            <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.7-.2-2.3H12v4.6h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.9z"/>
+            <path fill="#FBBC05" d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.3 0-.8.2-1.6.4-2.3L1.9 7.3C.7 9.7 0 12.3 0 15.2c0 2.8.7 5.4 1.9 7.8l3.7-2.9z"/>
+            <path fill="#34A853" d="M12 23.5c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2.4-6.4-5.2L1.9 16.5C3.7 20.4 7.5 23.5 12 23.5z"/>
+          </svg>
+          <span>Continue with Google</span>
+        </a>
+      </div>
+    `;
+    return;
+  }
 
   try {
     const res = await fetch('/api/assets?limit=3');
@@ -1632,7 +1904,7 @@ async function fetchRecentDashboardAssets() {
               ${(asset.tags || []).slice(0, 3).map(t => `<span class="asset-mini-tag">#${escapeHtml(t)}</span>`).join('')}
             </div>
             <div class="asset-footer-row">
-              <span>${asset.originalSize || 'Cloudinary'}</span>
+              <span>${formatFileSize(asset.bytes) || 'Cloudinary'}</span>
               <span class="asset-size-savings">Open in Studio →</span>
             </div>
           </div>
@@ -1641,7 +1913,7 @@ async function fetchRecentDashboardAssets() {
     } else {
       recentGrid.innerHTML = `
         <div style="grid-column: 1/-1; text-align: center; padding: 32px 16px; color: var(--text-muted);">
-          <p style="font-size: 14px; color: #fff;">No recent uploads yet</p>
+          <p style="font-size: 14px; color: #fff;">No assets uploaded yet</p>
           <p style="font-size: 12px; margin-top: 4px;">Upload an image to trigger the automated Cloudinary AI pipeline.</p>
           <button class="btn btn-primary btn-sm" onclick="navigateTo('upload')" style="margin-top: 12px;">＋ Process New Image</button>
         </div>
@@ -1723,7 +1995,6 @@ function initSettings() {
     });
   }
 
-  // Verify health on initialization
   checkCloudinaryBackendHealth(false);
 }
 
@@ -1734,7 +2005,6 @@ let currentLightboxUrl = '';
 let currentLightboxFilename = 'cloudinary_asset.jpg';
 
 function initLightboxListeners() {
-  // Global Escape key listener for closing modals & lightbox
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       window.closeLightbox();
@@ -1747,7 +2017,7 @@ function initLightboxListeners() {
     copyBtn.addEventListener('click', () => {
       if (currentLightboxUrl) {
         navigator.clipboard.writeText(currentLightboxUrl).then(() => {
-          showToast('✓ Real Cloudinary URL copied to clipboard!');
+          showToast('✓ Signed Asset URL copied to clipboard!');
         }).catch(() => {
           showToast('Asset URL copied.', 'info');
         });
@@ -1765,7 +2035,7 @@ function initLightboxListeners() {
   }
 }
 
-window.openLightbox = function(url, title = 'Asset Preview', subtitle = 'Cloudinary Live Media') {
+window.openLightbox = function(url, title = 'Asset Preview', subtitle = 'Cloudinary Signed Media') {
   if (!url) {
     showToast('No asset image available for preview.', 'info');
     return;
@@ -1773,7 +2043,6 @@ window.openLightbox = function(url, title = 'Asset Preview', subtitle = 'Cloudin
 
   currentLightboxUrl = url;
   
-  // Format clean filename for download
   const baseName = (state.uploadedAsset && (state.uploadedAsset.originalName || state.uploadedAsset.title))
     ? (state.uploadedAsset.originalName || state.uploadedAsset.title).replace(/\.[^/.]+$/, "")
     : 'cloudinary_asset';
@@ -1798,7 +2067,7 @@ window.openLightbox = function(url, title = 'Asset Preview', subtitle = 'Cloudin
   }
 };
 
-window.openLightboxFromId = function(imgElementId, title = 'Asset Preview', subtitle = 'Cloudinary Live Media') {
+window.openLightboxFromId = function(imgElementId, title = 'Asset Preview', subtitle = 'Cloudinary Signed Media') {
   const img = document.getElementById(imgElementId);
   const url = (img && img.src) ? img.src : '';
   if (!url) {
@@ -1841,7 +2110,6 @@ window.triggerDownload = async function(url, filename = 'cloudinary_asset.jpg') 
     showToast(`✓ Downloaded ${filename}!`, 'success');
   } catch (err) {
     console.warn('[Download fallback]:', err);
-    // Direct link fallback
     const a = document.createElement('a');
     a.href = url;
     a.target = '_blank';
@@ -1863,4 +2131,3 @@ window.downloadFromImgId = function(imgElementId, filename) {
   const actualFilename = filename || 'cloudinary_media.jpg';
   window.triggerDownload(url, actualFilename);
 };
-
